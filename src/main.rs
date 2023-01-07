@@ -19,6 +19,7 @@
 // qty of planes denied
 // average time of service (from land to takeoff)
 
+use std::ops::Div;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
@@ -47,14 +48,13 @@ impl Default for Plane {
     }
 }
 
-async fn plane_generator(number_of_planes: u8, interval: Duration, sender: Sender<Plane>) {
+async fn plane_generator(number_of_planes: usize, interval: Duration, sender: Sender<Plane>) {
     let mut interval = tokio::time::interval(interval);
     for i in 0..number_of_planes {
         interval.tick().await;
         println!("sending plane: {i}");
         if sender.try_send(Plane::default()).is_err() {
-            println!("plane is gone!");
-            continue;
+            panic!("Plane is gone! This should never happen");
         }
     }
 }
@@ -96,27 +96,48 @@ async fn plane_receiver(
 
 #[tokio::main]
 async fn main() {
-    let total_planes = 10;
+    const TOTAL_PLANES: usize = 10;
+    const QTY_RUNWAYS: usize = 1;
+    const QTY_HANGARS: usize = 3;
+    const PLANE_INTERVAL: Duration = Duration::from_secs(1);
 
-    let (plane_tx, mut plane_rx) = tokio::sync::mpsc::channel::<Plane>(1);
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<Plane>(10);
+    let (arrivals_tx, mut arrivals_rx) = tokio::sync::mpsc::channel::<Plane>(1);
+    let (departures_tx, mut departures_rx) = tokio::sync::mpsc::channel::<Plane>(TOTAL_PLANES);
 
-    let available_runways = Arc::new(Semaphore::new(1));
-    let available_hangars = Arc::new(Semaphore::new(3));
+    let available_runways = Arc::new(Semaphore::new(QTY_RUNWAYS));
+    let available_hangars = Arc::new(Semaphore::new(QTY_HANGARS));
 
-    tokio::spawn(plane_generator(
-        total_planes,
-        Duration::from_secs(1),
-        plane_tx,
-    ));
+    tokio::spawn(plane_generator(TOTAL_PLANES, PLANE_INTERVAL, arrivals_tx));
 
     tokio::spawn(async move {
-        while let Some(plane) = plane_rx.recv().await {
-            tokio::spawn(plane_receiver(available_runways.clone(), available_hangars.clone(), plane, done_tx.clone()));
+        while let Some(plane) = arrivals_rx.recv().await {
+            tokio::spawn(plane_receiver(
+                available_runways.clone(),
+                available_hangars.clone(),
+                plane,
+                departures_tx.clone(),
+            ));
         }
     });
 
-    while let Some(plane) = done_rx.recv().await {
-        println!("received a plane, service time: {}", plane.created_at.elapsed().as_millis());
+    let mut service_times = Vec::with_capacity(TOTAL_PLANES / 2);
+
+    while let Some(plane) = departures_rx.recv().await {
+        let service_time = plane.created_at.elapsed().as_millis();
+        println!(
+            "received a plane, service time: {}",
+            service_time
+        );
+        service_times.push(service_time);
     }
+
+    let qty_accepted_planes = service_times.len();
+
+    println!();
+    println!("--------------------------------");
+    println!("accepted planes: {}", qty_accepted_planes);
+    println!("denied planes: {}", TOTAL_PLANES - qty_accepted_planes);
+    println!("service times: {service_times:?}");
+    println!("avg service time: {}", service_times.iter().sum::<u128>().div(qty_accepted_planes as u128));
+    println!("--------------------------------");
 }
